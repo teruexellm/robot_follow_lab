@@ -1,0 +1,100 @@
+# robot-follow-lab : ユーザーから見た実行入口 (spec v2.0 §50, §51)
+#
+#   docker compose build
+#   docker compose --profile train run --rm trainer
+#   docker compose up demo
+#
+# models/ data/ output/ のみをホストと共有する。ソースはイメージへ取り込み済み。
+
+x-common: &common
+  build:
+    context: .
+    target: app
+  image: robot-follow-lab:latest
+  environment: &common-env
+    ROS_DOMAIN_ID: "42"
+    # ROS_LOCALHOST_ONLY は設定しない。Jazzy では deprecated で、
+    # "0" (= 既定と同じ挙動) を与えるだけでノードごとに WARN が 2 行出る。
+    # 37 ノード x 2 行 = 74 行。すべて WARN で ERROR は無い (DEVLOG S-31)
+    LIBGL_ALWAYS_SOFTWARE: "1"
+    QT_QPA_PLATFORM: "offscreen"
+    # 実行ユーザがイメージの /etc/passwd に無いので、HOME と USER を
+    # 明示する。どちらも省けない (DEVLOG S-21):
+    #   HOME  gz sim と ros2 が書ける HOME を必要とする (~/.gz, ~/.ros)
+    #   USER  gz transport が partition 名を決めるのに使う。未設定だと
+    #         getpwuid が失敗して discovery が成立せず、Gazebo は起動する
+    #         のに spawn が "Requesting list of world names" を繰り返す
+    HOME: "/tmp"
+    USER: "followbot"
+  # 成果物をホストのユーザ所有で作る (DEVLOG S-21)。
+  # 指定しないと output/ data/ models/ が root 所有になり、利用者が
+  # 自分の出力を消せない。Makefile が HOST_UID / HOST_GID を渡す
+  user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+  # DDS の共有メモリ用。コンテナ既定の 64MB では不足しやすい。
+  shm_size: "512m"
+
+services:
+
+  demo:
+    <<: *common
+    environment:
+      <<: *common-env
+      SCENARIO: "${SCENARIO:-occlusion_test}"
+      PERCEPTION_MODE: "${PERCEPTION_MODE:-ai}"
+      SIM_DURATION: "${SIM_DURATION:-300}"
+      FOLLOW_DISTANCE: "${FOLLOW_DISTANCE:-1.0}"
+      # ここに書いていない変数はコンテナへ届かない。
+      # README が案内する RUN_ID / MAKE_VIDEO が無言で無視されていた
+      # (DEVLOG S-14)
+      RUN_ID: "${RUN_ID:-}"
+      MAKE_VIDEO: "${MAKE_VIDEO:-true}"
+    volumes:
+      - ./models:/workspace/models
+      - ./output:/workspace/output
+      # data/demo_eval を check-ai-demo が読む。学習データも参照する
+      - ./data:/workspace/data
+    command: ["/workspace/scripts/run_demo.sh"]
+
+  trainer:
+    <<: *common
+    profiles: ["train"]
+    environment:
+      <<: *common-env
+      TRAIN_IMAGES: "${TRAIN_IMAGES:-2000}"
+      TRAIN_EPOCHS: "${TRAIN_EPOCHS:-20}"   # train_detector.py の既定と一致させる
+      TRAIN_SEED: "${TRAIN_SEED:-42}"
+      # spec §64 の pipeline test。精度の未達を警告にとどめる。
+      # ここに書かないと make test-pipeline が効かない (DEVLOG S-14)
+      PIPELINE_TEST: "${PIPELINE_TEST:-}"
+    volumes:
+      - ./models:/workspace/models
+      - ./data:/workspace/data
+    command: ["/workspace/scripts/train_ai.sh"]
+
+  test:
+    <<: *common
+    profiles: ["test"]
+    environment:
+      <<: *common-env
+      RUN_DIR: "${RUN_DIR:-}"
+    volumes:
+      - ./models:/workspace/models
+      - ./output:/workspace/output
+      # run_tests.sh の AI 誤検出検査が data/demo_eval を読む
+      - ./data:/workspace/data
+    command: ["/workspace/scripts/run_tests.sh"]
+
+  smoke:
+    <<: *common
+    profiles: ["test"]
+    environment:
+      <<: *common-env
+      SCENARIO: "${SCENARIO:-simple_loop}"
+      PERCEPTION_MODE: "${PERCEPTION_MODE:-marker}"
+      SIM_DURATION: "${SIM_DURATION:-45}"
+      RUN_ID: "${RUN_ID:-}"
+    volumes:
+      - ./models:/workspace/models
+      - ./output:/workspace/output
+      - ./data:/workspace/data
+    command: ["/workspace/scripts/smoke_test.sh"]

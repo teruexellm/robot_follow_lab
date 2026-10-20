@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>video_compositor</name>
+  <version>0.1.0</version>
+  <description>combined.mp4 の生成 (spec v2.0 §57, §58, §59)</description>
+  <maintainer email="344744385+teruexellm@users.noreply.github.com">teruexellm</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export><build_type>ament_python</build_type></export>
+</package>

@@ -1,0 +1,24 @@
+# Nav2 の障害物回避確認 (spec v2.0 §47)
+# 障害物の間隙を通る経路を与え、Leader / Follower の双方に回避を発生させる。
+name: obstacle_loop
+description: 障害物の間隙を通過する周回。Nav2 の global/local planner を確認する。
+world: demo_world.sdf
+duration_sec: 300
+
+leader:
+  initial_pose: {x: -1.8, y: -3.0, yaw: 0.0}
+  speed_limit: 0.35
+  loop: true
+  waypoints:
+    - {x:  3.0, y: -3.0, yaw: 1.5708}   # obstacle_3 の東側を回る
+    - {x:  3.0, y:  0.6, yaw: 3.1416}
+    - {x:  0.5, y:  0.6, yaw: 1.5708}   # obstacle_1 と obstacle_2 の間を抜ける
+    - {x:  0.5, y:  3.0, yaw: 3.1416}
+    - {x: -3.0, y:  3.0, yaw: -1.5708}
+    - {x: -3.0, y: -3.0, yaw: 0.0}
+    - {x: -1.8, y: -3.0, yaw: 0.0}
+
+follower:
+  spawn_offset: {x: -1.2, y: 0.0}
+  follow_distance: 1.0
+  speed_limit: 0.50

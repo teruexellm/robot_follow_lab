@@ -1,0 +1,355 @@
+<?xml version="1.0"?>
+<!--
+  FollowBot : 教材用 差動二輪ロボット (spec v2.0 §8)
+
+  寸法 (spec §8):
+    body             0.35 x 0.28 x 0.15 m
+    wheel radius     0.06 m
+    wheel separation 0.25 m
+
+  設計上の要点:
+    * frame 名はすべて ${prefix} を付与する (spec §12)。joint 名は namespace で
+      分離されるため prefix を付けない -> controllers.yaml を 1 本で共用できる。
+    * 2D LiDAR は車体前方・地上高 0.12 m に搭載する。相手機の車体は地上高
+      0.03〜0.18 m を占めるため、走査平面が必ず車体を切る (spec §39 の融合が
+      成立する条件)。車体より上に載せると相手を一切検出できない。
+    * Leader/Follower の識別用に天面へ着色マーカーを載せる (spec §10)。
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="followbot">
+
+  <xacro:arg name="prefix"           default=""/>
+  <xacro:arg name="namespace"        default=""/>
+  <xacro:arg name="color"            default="0.1 0.2 1.0 1.0"/>
+  <xacro:arg name="controllers_file" default=""/>
+  <xacro:arg name="camera_topic"     default="camera/image_raw"/>
+  <xacro:arg name="lidar_topic"      default="scan"/>
+  <!-- 学習データ生成では Leader を「見た目だけ」spawn する。
+       センサと ros2_control を外して軽くするが、形状・色は同一に保つ。
+       デモで見るのと違う外観を学習させては意味がないため (spec §25)。 -->
+  <xacro:arg name="with_sensors"     default="true"/>
+  <xacro:arg name="with_control"     default="true"/>
+  <!-- 学習データ生成では Leader を静的モデルにする。
+       teleport を繰り返すと動的モデルには速度が残り、姿勢が揺れるため。 -->
+  <xacro:arg name="static_model"     default="false"/>
+
+  <xacro:property name="prefix"    value="$(arg prefix)"/>
+  <xacro:property name="with_sensors" value="$(arg with_sensors)"/>
+  <xacro:property name="with_control" value="$(arg with_control)"/>
+  <xacro:property name="static_model" value="$(arg static_model)"/>
+  <xacro:property name="ns"        value="$(arg namespace)"/>
+  <xacro:property name="color"     value="$(arg color)"/>
+
+  <!-- 寸法 -->
+  <xacro:property name="body_x"      value="0.35"/>
+  <xacro:property name="body_y"      value="0.28"/>
+  <xacro:property name="body_z"      value="0.15"/>
+  <xacro:property name="wheel_r"     value="0.06"/>
+  <xacro:property name="wheel_w"     value="0.04"/>
+  <xacro:property name="wheel_sep"   value="0.25"/>
+  <xacro:property name="caster_r"    value="0.03"/>
+  <xacro:property name="body_z_off"  value="0.045"/>   <!-- base_link からの車体中心オフセット -->
+  <!-- 接地は 3 点 (車輪 2 + 後部キャスタ 1) とする。
+       4 点接地かつ重心が車輪軸上にあると車輪に荷重が乗らず空転する
+       (実測: 指令 0.3 m/s に対し実移動 0.07 m/s)。詳細は DEVLOG P-2。
+       車輪を車体中心より前に出し、重心 (x=0) を車輪とキャスタの間に置くことで
+       車輪が荷重の約 75% を受ける。 -->
+  <xacro:property name="wheel_x"     value="0.05"/>
+  <xacro:property name="caster_x"    value="-0.15"/>
+  <xacro:property name="lidar_z"     value="0.06"/>    <!-- base_link 基準 -> 地上高 0.12 m -->
+  <xacro:property name="lidar_x"     value="0.19"/>    <!-- 車体前面より前 : 自己遮蔽を避ける -->
+  <xacro:property name="cam_x"       value="0.175"/>
+  <xacro:property name="cam_z"       value="0.09"/>    <!-- 地上高 0.15 m -->
+  <xacro:property name="body_mass"   value="6.0"/>
+  <xacro:property name="wheel_mass"  value="0.4"/>
+
+  <xacro:macro name="box_inertia" params="m x y z oz:=0">
+    <inertial>
+      <origin xyz="0 0 ${oz}"/>
+      <mass value="${m}"/>
+      <inertia ixx="${m*(y*y+z*z)/12.0}" ixy="0" ixz="0"
+               iyy="${m*(x*x+z*z)/12.0}" iyz="0"
+               izz="${m*(x*x+y*y)/12.0}"/>
+    </inertial>
+  </xacro:macro>
+
+  <xacro:macro name="cylinder_inertia" params="m r h">
+    <inertial>
+      <mass value="${m}"/>
+      <inertia ixx="${m*(3*r*r+h*h)/12.0}" ixy="0" ixz="0"
+               iyy="${m*(3*r*r+h*h)/12.0}" iyz="0"
+               izz="${m*r*r/2.0}"/>
+    </inertial>
+  </xacro:macro>
+
+  <!-- ===================== links ===================== -->
+
+  <link name="${prefix}base_footprint"/>
+
+  <link name="${prefix}base_link">
+    <xacro:box_inertia m="${body_mass}" x="${body_x}" y="${body_y}" z="${body_z}"
+                       oz="${body_z_off}"/>
+    <visual>
+      <origin xyz="0 0 ${body_z_off}"/>
+      <geometry><box size="${body_x} ${body_y} ${body_z}"/></geometry>
+      <material name="${prefix}body_color"><color rgba="${color}"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${body_z_off}"/>
+      <geometry><box size="${body_x} ${body_y} ${body_z}"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="${prefix}base_footprint"/>
+    <child  link="${prefix}base_link"/>
+    <origin xyz="0 0 ${wheel_r}"/>
+  </joint>
+
+  <!-- 認識用マーカー : 天面 (地上高 0.18〜0.28 m) -->
+  <link name="${prefix}marker_link">
+    <xacro:box_inertia m="0.3" x="0.20" y="0.20" z="0.10"/>
+    <visual>
+      <geometry><box size="0.20 0.20 0.10"/></geometry>
+      <material name="${prefix}marker_color"><color rgba="${color}"/></material>
+    </visual>
+    <collision>
+      <geometry><box size="0.20 0.20 0.10"/></geometry>
+    </collision>
+  </link>
+  <joint name="marker_joint" type="fixed">
+    <parent link="${prefix}base_link"/>
+    <child  link="${prefix}marker_link"/>
+    <origin xyz="0 0 ${body_z_off + body_z/2 + 0.05}"/>
+  </joint>
+
+  <xacro:macro name="wheel" params="side reflect">
+    <link name="${prefix}${side}_wheel_link">
+      <xacro:cylinder_inertia m="${wheel_mass}" r="${wheel_r}" h="${wheel_w}"/>
+      <visual>
+        <origin rpy="${pi/2} 0 0"/>
+        <geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry>
+        <material name="wheel_color"><color rgba="0.15 0.15 0.15 1.0"/></material>
+      </visual>
+      <collision>
+        <origin rpy="${pi/2} 0 0"/>
+        <geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry>
+      </collision>
+    </link>
+    <joint name="${side}_wheel_joint" type="continuous">
+      <parent link="${prefix}base_link"/>
+      <child  link="${prefix}${side}_wheel_link"/>
+      <origin xyz="${wheel_x} ${reflect * wheel_sep / 2} 0"/>
+      <axis xyz="0 1 0"/>
+      <dynamics damping="0.02" friction="0.0"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:wheel side="left"  reflect="1"/>
+  <xacro:wheel side="right" reflect="-1"/>
+
+  <!-- キャスタは前後 2 個にする。
+       車輪 (x=0) と後部キャスタ (x=-0.13) だけでは前方に支持点が無く、
+       車体が前のめりに倒れて前端下縁で静止する (実測 pitch 10.02 deg)。
+       LiDAR 走査面も 10 deg 傾くため、Camera+LiDAR 融合が成立しなくなる。
+       詳細は DEVLOG P-1。 -->
+  <xacro:macro name="caster" params="name x">
+    <link name="${prefix}${name}">
+      <xacro:cylinder_inertia m="0.1" r="${caster_r}" h="${caster_r}"/>
+      <visual>
+        <geometry><sphere radius="${caster_r}"/></geometry>
+        <material name="wheel_color"><color rgba="0.15 0.15 0.15 1.0"/></material>
+      </visual>
+      <collision>
+        <geometry><sphere radius="${caster_r}"/></geometry>
+      </collision>
+    </link>
+    <joint name="${name}_joint" type="fixed">
+      <parent link="${prefix}base_link"/>
+      <child  link="${prefix}${name}"/>
+      <origin xyz="${x} 0 ${caster_r - wheel_r}"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- spec §8 が要求する caster_link は後部キャスタ 1 個のみ -->
+  <xacro:caster name="caster_link" x="${caster_x}"/>
+
+  <link name="${prefix}camera_link">
+    <xacro:box_inertia m="0.05" x="0.03" y="0.06" z="0.03"/>
+    <visual>
+      <geometry><box size="0.03 0.06 0.03"/></geometry>
+      <material name="sensor_color"><color rgba="0.05 0.05 0.05 1.0"/></material>
+    </visual>
+  </link>
+  <joint name="camera_joint" type="fixed">
+    <parent link="${prefix}base_link"/>
+    <child  link="${prefix}camera_link"/>
+    <origin xyz="${cam_x} 0 ${cam_z}"/>
+  </joint>
+
+  <!-- 光学規約 (REP-103): z 前方 / x 右 / y 下 -->
+  <link name="${prefix}camera_optical_frame"/>
+  <joint name="camera_optical_joint" type="fixed">
+    <parent link="${prefix}camera_link"/>
+    <child  link="${prefix}camera_optical_frame"/>
+    <origin rpy="${-pi/2} 0 ${-pi/2}"/>
+  </joint>
+
+  <link name="${prefix}lidar_link">
+    <xacro:cylinder_inertia m="0.1" r="0.03" h="0.04"/>
+    <visual>
+      <geometry><cylinder radius="0.03" length="0.04"/></geometry>
+      <material name="sensor_color"><color rgba="0.05 0.05 0.05 1.0"/></material>
+    </visual>
+  </link>
+  <joint name="lidar_joint" type="fixed">
+    <parent link="${prefix}base_link"/>
+    <child  link="${prefix}lidar_link"/>
+    <origin xyz="${lidar_x} 0 ${lidar_z}"/>
+  </joint>
+
+  <!-- ===================== ros2_control (spec §9) ===================== -->
+
+  <xacro:if value="${with_control}">
+  <ros2_control name="FollowBotSystem" type="system">
+    <hardware>
+      <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+    </hardware>
+    <joint name="left_wheel_joint">
+      <command_interface name="velocity">
+        <param name="min">-15.0</param>
+        <param name="max">15.0</param>
+      </command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="right_wheel_joint">
+      <command_interface name="velocity">
+        <param name="min">-15.0</param>
+        <param name="max">15.0</param>
+      </command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+  </ros2_control>
+  </xacro:if>
+
+  <!-- ===================== Gazebo ===================== -->
+
+  <xacro:if value="${static_model}">
+    <gazebo>
+      <static>true</static>
+    </gazebo>
+  </xacro:if>
+
+  <gazebo reference="${prefix}base_link">
+    <material>
+      <ambient>${color}</ambient>
+      <diffuse>${color}</diffuse>
+    </material>
+    <mu1>0.2</mu1><mu2>0.2</mu2>
+  </gazebo>
+
+  <gazebo reference="${prefix}marker_link">
+    <material>
+      <ambient>${color}</ambient>
+      <diffuse>${color}</diffuse>
+    </material>
+  </gazebo>
+
+  <xacro:macro name="wheel_gazebo" params="side">
+    <gazebo reference="${prefix}${side}_wheel_link">
+      <mu1>1.5</mu1><mu2>1.5</mu2>
+      <kp>1e7</kp><kd>10.0</kd>
+      <!-- gz-sim は <mu1> 短縮形を無視することがあるため surface 形式も併記する -->
+      <surface>
+        <friction>
+          <ode><mu>1.5</mu><mu2>1.5</mu2></ode>
+        </friction>
+      </surface>
+    </gazebo>
+  </xacro:macro>
+  <xacro:wheel_gazebo side="left"/>
+  <xacro:wheel_gazebo side="right"/>
+
+  <xacro:macro name="caster_gazebo" params="name">
+    <gazebo reference="${prefix}${name}">
+      <mu1>0.0</mu1><mu2>0.0</mu2>
+      <surface>
+        <friction>
+          <ode><mu>0.0</mu><mu2>0.0</mu2></ode>
+        </friction>
+      </surface>
+    </gazebo>
+  </xacro:macro>
+  <xacro:caster_gazebo name="caster_link"/>
+
+  <xacro:if value="${with_sensors}">
+  <!-- RGB Camera (spec §13): 320x240 / 10 Hz / FOV 約100deg -->
+  <gazebo reference="${prefix}camera_link">
+    <sensor name="camera" type="camera">
+      <topic>${ns}/$(arg camera_topic)</topic>
+      <camera_info_topic>${ns}/$(arg camera_topic)/camera_info</camera_info_topic>
+      <gz_frame_id>${prefix}camera_optical_frame</gz_frame_id>
+      <update_rate>10</update_rate>
+      <always_on>1</always_on>
+      <camera>
+        <horizontal_fov>1.745</horizontal_fov>
+        <image><width>320</width><height>240</height><format>R8G8B8</format></image>
+        <clip><near>0.05</near><far>20.0</far></clip>
+        <optical_frame_id>${prefix}camera_optical_frame</optical_frame_id>
+      </camera>
+    </sensor>
+  </gazebo>
+
+  <!-- 2D LiDAR (spec §13): 360 samples / 10 Hz / 0.1-8 m / 360deg -->
+  <gazebo reference="${prefix}lidar_link">
+    <sensor name="lidar" type="gpu_lidar">
+      <topic>${ns}/$(arg lidar_topic)</topic>
+      <gz_frame_id>${prefix}lidar_link</gz_frame_id>
+      <update_rate>10</update_rate>
+      <always_on>1</always_on>
+      <lidar>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <resolution>1</resolution>
+            <min_angle>-3.14159</min_angle>
+            <max_angle>3.14159</max_angle>
+          </horizontal>
+        </scan>
+        <range><min>0.10</min><max>8.0</max><resolution>0.01</resolution></range>
+        <noise><type>gaussian</type><mean>0.0</mean><stddev>0.005</stddev></noise>
+      </lidar>
+    </sensor>
+  </gazebo>
+  </xacro:if>
+
+  <!-- 真値 pose (spec §18: 評価・動画・学習ラベル専用。Follower へ渡してはならない)
+       /model/<name>/pose へ gz.msgs.Pose として出る。ROS 側では
+       /ground_truth/<ns>/pose へリマップして用途を明示する。 -->
+  <gazebo>
+    <plugin filename="gz-sim-pose-publisher-system" name="gz::sim::systems::PosePublisher">
+      <publish_link_pose>false</publish_link_pose>
+      <publish_collision_pose>false</publish_collision_pose>
+      <publish_visual_pose>false</publish_visual_pose>
+      <publish_sensor_pose>false</publish_sensor_pose>
+      <publish_nested_model_pose>false</publish_nested_model_pose>
+      <publish_model_pose>true</publish_model_pose>
+      <use_pose_vector_msg>false</use_pose_vector_msg>
+      <update_frequency>20</update_frequency>
+    </plugin>
+  </gazebo>
+
+  <!-- gz_ros2_control (spec §9): Gazebo DiffDrive プラグインは使用しない -->
+  <xacro:if value="${with_control}">
+  <gazebo>
+    <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+      <parameters>$(arg controllers_file)</parameters>
+      <ros>
+        <namespace>${ns}</namespace>
+      </ros>
+    </plugin>
+  </gazebo>
+  </xacro:if>
+
+</robot>

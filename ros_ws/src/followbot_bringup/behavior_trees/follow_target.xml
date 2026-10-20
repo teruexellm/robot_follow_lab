@@ -1,0 +1,83 @@
+<!--
+  follow_target : 動く対象を一定距離で追い続ける Behavior Tree (spec §42)
+
+  通常の navigate_to_pose_w_replanning_and_recovery.xml との違いは 2 点。
+
+  1. GoalUpdater を使う
+     追従では対象が動くたびにゴールが変わる。action のゴールを送り直すと
+     前のゴールが preemption で ABORTED になり、bt_navigator が
+     ComputePathToPose -> FollowPath を毎回作り直すため、
+     Follower が加速しきれず Leader に追いつけなくなる (DEVLOG T-4)。
+     GoalUpdater は `<ns>/goal_update` トピックからゴールを受け取るので、
+     action のゴールは 1 回で済み、以後は走りながら追従先だけが更新される。
+
+  2. GoalReached で「到達中は FollowPath を止める」
+     KeepRunningUntilFailure だけだと、到達して FollowPath が SUCCESS を
+     返した瞬間に BT tick (10 ms) ごとに FollowPath を作り直してしまう。
+     ReactiveFallback で先に GoalReached を見て、到達している間は
+     FollowPath を halt して待つ。対象が離れれば自動的に走り出す。
+
+  Leader (waypoint 走行) はこの BT を使わない。到達して SUCCEEDED を
+  返す必要があるため、Nav2 既定の BT のままにする。
+
+  nav2_bt_navigator の follow_point.xml は使わない。あちらは
+  「Leader の位置をゴールにして TruncatePath で手前で止める」設計だが、
+  TruncatePath はパスが指定距離より短いとき**切らずにそのまま返す**ため、
+  近接時に Leader 自身をゴールにしてしまう。spec §41 が禁じる状態なので、
+  スタンドオフ点は follow_controller 側で計算して publish する。
+
+  プレースホルダ (nav2.launch.py が置換する):
+      __NS__         robot_base_frame の prefix
+      __REPLAN_HZ__  global path の再計画周期 [Hz]
+-->
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="FollowRecovery">
+      <PipelineSequence name="FollowWithGoalUpdate">
+
+        <RateController hz="__REPLAN_HZ__">
+          <RecoveryNode number_of_retries="1" name="ComputePath">
+            <GoalUpdater input_goal="{goal}" output_goal="{updated_goal}">
+              <ComputePathToPose goal="{updated_goal}" path="{path}"
+                                 planner_id="GridBased"
+                                 error_code_id="{compute_path_error_code}"/>
+            </GoalUpdater>
+            <Sequence>
+              <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+              <ClearEntireCostmap name="ClearGlobalCostmap-Context"
+                                  service_name="global_costmap/clear_entirely_global_costmap"/>
+            </Sequence>
+          </RecoveryNode>
+        </RateController>
+
+        <KeepRunningUntilFailure>
+          <ReactiveFallback name="DriveOrHold">
+            <!-- 追従距離に到達している間は走らない (spec §41) -->
+            <GoalReached goal="{updated_goal}" global_frame="map"
+                         robot_base_frame="__NS__/base_link"/>
+            <RecoveryNode number_of_retries="1" name="FollowPath">
+              <FollowPath path="{path}" controller_id="FollowPath"
+                          error_code_id="{follow_path_error_code}"/>
+              <Sequence>
+                <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+                <ClearEntireCostmap name="ClearLocalCostmap-Context"
+                                    service_name="local_costmap/clear_entirely_local_costmap"/>
+              </Sequence>
+            </RecoveryNode>
+          </ReactiveFallback>
+        </KeepRunningUntilFailure>
+
+      </PipelineSequence>
+
+      <!-- 計画も制御も駄目なら costmap を作り直す。Spin / BackUp は使わない。
+           SEARCHING の回転 (follow_controller) と競合させないため。 -->
+      <Sequence name="ClearBothCostmaps">
+        <ClearEntireCostmap name="ClearLocalCostmap-Subtree"
+                            service_name="local_costmap/clear_entirely_local_costmap"/>
+        <ClearEntireCostmap name="ClearGlobalCostmap-Subtree"
+                            service_name="global_costmap/clear_entirely_global_costmap"/>
+      </Sequence>
+
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

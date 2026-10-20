@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>followbot_bringup</name>
+  <version>0.1.0</version>
+  <description>FollowBot: Gazebo / ros2_control / Nav2 の起動一式</description>
+  <maintainer email="344744385+teruexellm@users.noreply.github.com">teruexellm</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+
+  <exec_depend>followbot_description</exec_depend>
+  <!-- launch が scenario パーサを import する (spec §16) -->
+  <exec_depend>leader_mission</exec_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>ros_gz_image</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_common</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export><build_type>ament_cmake</build_type></export>
+</package>

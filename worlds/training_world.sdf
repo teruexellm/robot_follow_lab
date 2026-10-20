@@ -1,0 +1,209 @@
+<?xml version="1.0" ?>
+<!--
+  training_world : 学習データ生成用の world (spec v2.0 §26)
+
+  demo_world とは別世界にする。目的が違う:
+    demo_world     再現可能な追従デモ。配置は固定
+    training_world 画像の多様性を作る。配置を毎サンプル変える
+
+  ランダム化の対象 (spec §26) と、この world 側の受け口:
+    Leader distance / bearing / orientation  -> leader モデルを teleport
+    Camera orientation                       -> training_camera を teleport
+    background                               -> カメラ位置を変えると壁・パネルが変わる
+    lighting                                 -> sun を /world/training/light_config で変更
+    obstacle placement                       -> obstacle_a/b/c を teleport
+    partial occlusion                        -> occluder をカメラと Leader の間に置く
+
+  Leader モデルは demo と同一の xacro から spawn する
+  (with_sensors:=false with_control:=false で軽量化)。
+  外観が違うものを学習させては意味がない。
+
+  カメラは生成速度のため 20 Hz にしている (demo は 10 Hz)。
+
+  **外観は demo_world に揃える** (部屋の内寸 8m / 壁高 0.6m / 壁・床・障害物の色)。
+  当初は別の外観 (10m 四方・壁高 1.0m・独自の壁色) にしていたが、
+  学習したモデルを demo_world で動かすと center_x に **+0.05 (方位 -6.5 deg) の
+  系統的バイアス**が出た。validation (training_world 由来) では方位 MAE 1.52 deg
+  なのに実機で 6.51 deg という差で、小型 CNN が青い対象の位置だけでなく
+  背景レイアウト (床と壁の境界が画像内のどの行に来るか) にも依存していた。
+  詳細は DEVLOG X-1。
+  姿勢・照明・障害物配置のランダム化は維持する (spec §26)。
+-->
+<sdf version="1.9">
+  <world name="training">
+
+    <physics name="4ms" type="ignored">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system"           name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-sensors-system"           name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <!-- set_pose / light_config サービスを提供する。teleport に必須 -->
+    <plugin filename="gz-sim-user-commands-system"     name="gz::sim::systems::UserCommands"/>
+
+    <scene>
+      <ambient>0.5 0.5 0.5 1</ambient>
+      <background>0.7 0.75 0.8 1</background>
+      <grid>false</grid>
+    </scene>
+
+    <!-- 照明。生成時に direction と diffuse を変更する -->
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.4 0.2 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>20 20</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>20 20</size></plane></geometry>
+          <material>
+            <ambient>0.55 0.55 0.55 1</ambient>
+            <diffuse>0.65 0.65 0.65 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ========== 外壁 (内寸 8m x 8m / 壁高 0.6m)。demo_world と同一 ========== -->
+    <model name="walls">
+      <static>true</static>
+      <link name="link">
+        <collision name="n_c"><pose>0 4.05 0.3 0 0 0</pose>
+          <geometry><box><size>8.2 0.1 0.6</size></box></geometry></collision>
+        <visual name="n_v"><pose>0 4.05 0.3 0 0 0</pose>
+          <geometry><box><size>8.2 0.1 0.6</size></box></geometry>
+          <material><ambient>0.4 0.4 0.42 1</ambient><diffuse>0.5 0.5 0.52 1</diffuse></material></visual>
+        <collision name="s_c"><pose>0 -4.05 0.3 0 0 0</pose>
+          <geometry><box><size>8.2 0.1 0.6</size></box></geometry></collision>
+        <visual name="s_v"><pose>0 -4.05 0.3 0 0 0</pose>
+          <geometry><box><size>8.2 0.1 0.6</size></box></geometry>
+          <material><ambient>0.4 0.4 0.42 1</ambient><diffuse>0.5 0.5 0.52 1</diffuse></material></visual>
+        <collision name="e_c"><pose>4.05 0 0.3 0 0 0</pose>
+          <geometry><box><size>0.1 8.2 0.6</size></box></geometry></collision>
+        <visual name="e_v"><pose>4.05 0 0.3 0 0 0</pose>
+          <geometry><box><size>0.1 8.2 0.6</size></box></geometry>
+          <material><ambient>0.4 0.4 0.42 1</ambient><diffuse>0.5 0.5 0.52 1</diffuse></material></visual>
+        <collision name="w_c"><pose>-4.05 0 0.3 0 0 0</pose>
+          <geometry><box><size>0.1 8.2 0.6</size></box></geometry></collision>
+        <visual name="w_v"><pose>-4.05 0 0.3 0 0 0</pose>
+          <geometry><box><size>0.1 8.2 0.6</size></box></geometry>
+          <material><ambient>0.4 0.4 0.42 1</ambient><diffuse>0.5 0.5 0.52 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ========== 背景の多様性を作るパネル ==========
+         カメラの向きによって写る背景が変わるよう、壁際に色違いの板を置く。
+         Leader の青 (H≒112) と紛れない色を選び、色だけに依存しない
+         学習になるようにする (spec §67-A の domain randomization の下地)。 -->
+    <model name="panel_warm">
+      <static>true</static>
+      <pose>-2.5 3.95 0.3 0 0 0</pose>
+      <link name="link">
+        <visual name="v">
+          <geometry><box><size>2.4 0.05 0.55</size></box></geometry>
+          <material><ambient>0.55 0.35 0.2 1</ambient><diffuse>0.7 0.45 0.25 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="panel_green">
+      <static>true</static>
+      <pose>2.5 -3.95 0.3 0 0 0</pose>
+      <link name="link">
+        <visual name="v">
+          <geometry><box><size>2.4 0.05 0.55</size></box></geometry>
+          <material><ambient>0.25 0.45 0.3 1</ambient><diffuse>0.3 0.6 0.35 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="panel_dark">
+      <static>true</static>
+      <pose>3.95 2.5 0.3 0 0 1.5708</pose>
+      <link name="link">
+        <visual name="v">
+          <geometry><box><size>2.4 0.05 0.55</size></box></geometry>
+          <material><ambient>0.2 0.2 0.22 1</ambient><diffuse>0.25 0.25 0.28 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ========== 学習用カメラ ==========
+         FollowBot の camera_link と同じ内部パラメータ・同じ地上高にする。
+         生成時に teleport して位置と向きを変える。 -->
+    <model name="training_camera">
+      <static>true</static>
+      <pose>0 0 0.15 0 0 0</pose>
+      <link name="link">
+        <sensor name="camera" type="camera">
+          <topic>training_camera/image_raw</topic>
+          <camera_info_topic>training_camera/camera_info</camera_info_topic>
+          <gz_frame_id>training_camera</gz_frame_id>
+          <update_rate>20</update_rate>
+          <always_on>1</always_on>
+          <camera>
+            <horizontal_fov>1.745</horizontal_fov>
+            <image><width>320</width><height>240</height><format>R8G8B8</format></image>
+            <clip><near>0.05</near><far>20.0</far></clip>
+          </camera>
+        </sensor>
+      </link>
+    </model>
+
+    <!-- ========== 遮蔽・障害物 ==========
+         occluder はカメラと Leader の間に置いて部分遮蔽を作る (spec §26, §27)。
+         obstacle_a/b/c は背景の変化と干渉のために散らす。 -->
+    <model name="occluder">
+      <static>true</static>
+      <pose>0 -20 0.4 0 0 0</pose>   <!-- 未使用時は視野外へ退避させる -->
+      <link name="link">
+        <visual name="v">
+          <geometry><box><size>0.6 0.6 0.8</size></box></geometry>
+          <material><ambient>0.42 0.34 0.26 1</ambient><diffuse>0.55 0.44 0.32 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="obstacle_a">
+      <static>true</static>
+      <pose>2.5 2.5 0.4 0 0 0</pose>
+      <link name="link">
+        <visual name="v">
+          <geometry><box><size>0.9 0.9 0.8</size></box></geometry>
+          <material><ambient>0.45 0.35 0.25 1</ambient><diffuse>0.6 0.45 0.3 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="obstacle_b">
+      <static>true</static>
+      <pose>-2.5 2.5 0.3 0 0 0</pose>
+      <link name="link">
+        <visual name="v">
+          <geometry><cylinder><radius>0.35</radius><length>0.6</length></cylinder></geometry>
+          <material><ambient>0.5 0.5 0.3 1</ambient><diffuse>0.65 0.65 0.4 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+    <model name="obstacle_c">
+      <static>true</static>
+      <pose>-2.5 -2.5 0.25 0 0 0</pose>
+      <link name="link">
+        <visual name="v">
+          <geometry><box><size>1.2 0.4 0.5</size></box></geometry>
+          <material><ambient>0.3 0.3 0.35 1</ambient><diffuse>0.4 0.4 0.45 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

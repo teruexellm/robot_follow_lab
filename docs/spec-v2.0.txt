@@ -1,0 +1,1934 @@
+# ROS 2 + Gazebo + Nav2 + AI Perception
+# マルチロボット追従演習 実装仕様書 v2.0
+
+## 1. 目的
+
+ROS 2の主要エコシステムを組み合わせ、2台の移動ロボットによるLeader-Followerシステムを構築する。
+
+Leaderはあらかじめ設定された経路を自律走行する。
+
+FollowerはLeaderの経路・位置・Odometryなどを直接参照してはならず、自身に搭載されたCamera、LiDAR、OdometryとAI Perceptionを利用してLeaderを発見し、Nav2によって追従する。
+
+最終的に以下を一連の再現可能な演習として実現する。
+
+```text
+Gazebo
+  ↓
+Synthetic Training Data Generation
+  ↓
+AI Training
+  ↓
+ONNX Export
+  ↓
+ROS 2 AI Perception
+  ↓
+Target Pose Estimation
+  ↓
+Nav2 Dynamic Following
+  ↓
+Gazebo Robot Motion
+  ↓
+rosbag2 / Telemetry / Video
+```
+
+---
+
+# 2. 重要な設計方針
+
+本演習ではAIにロボットの全制御を行わせない。
+
+責任範囲を以下のように分離する。
+
+```text
+Gazebo
+    物理シミュレーション・センサ
+
+ros2_control
+    車輪の低レベル制御
+
+Nav2
+    経路計画・障害物回避・移動
+
+AI Perception
+    Camera画像からLeaderを認識
+
+Target Pose Estimator
+    Camera + LiDARからLeader位置を推定
+
+ROS 2
+    各コンポーネントの接続
+
+Docker Compose
+    再現可能な実行環境
+```
+
+AIは主として「何がどこに見えているか」を担当し、NavigationはNav2に任せる。
+
+---
+
+# 3. 基準ソフトウェア
+
+以下を基準とする。
+
+```text
+Ubuntu 24.04 LTS
+ROS 2 Jazzy
+Gazebo Harmonic
+ros2_control
+gz_ros2_control
+Nav2
+Python 3
+rclpy
+OpenCV
+PyTorch CPU
+ONNX Runtime CPU
+rosbag2
+FFmpeg
+Docker
+Docker Compose v2
+```
+
+GPUを必須としない。
+
+CPU-onlyで、
+
+```text
+AI学習
+AI推論
+Gazebo
+Nav2
+動画生成
+```
+
+まで実行可能にする。
+
+---
+
+# 4. 最終的な利用方法
+
+初回は以下を実行する。
+
+```bash
+git clone <repository>
+cd robot-follow-lab
+
+make build
+make train-ai
+make demo
+```
+
+またはDocker Composeを直接使用できること。
+
+```bash
+docker compose build
+docker compose --profile train run --rm trainer
+docker compose up demo
+```
+
+---
+
+# 5. 学習済みモデルを配布しない
+
+重要な要件として、
+
+```text
+models/leader_detector.onnx
+```
+
+をGit repositoryへ含めてはならない。
+
+初期状態:
+
+```text
+models/
+└── .gitkeep
+```
+
+とする。
+
+AIモデルは必ず、
+
+```bash
+make train-ai
+```
+
+によって生成可能でなければならない。
+
+---
+
+# 6. make train-ai の責務
+
+`make train-ai`は以下を完全自動実行する。
+
+```text
+make train-ai
+      │
+      ▼
+Gazebo training world起動
+      │
+      ▼
+Synthetic images生成
+      │
+      ▼
+自動annotation
+      │
+      ▼
+train / validation split
+      │
+      ▼
+AI model training
+      │
+      ▼
+validation
+      │
+      ▼
+ONNX export
+      │
+      ▼
+ONNX Runtime validation
+      │
+      ▼
+models/leader_detector.onnx
+```
+
+人手による画像annotationを要求してはならない。
+
+外部の学習データセットも要求してはならない。
+
+---
+
+# 7. Repository構造
+
+以下を基本とする。
+
+```text
+robot-follow-lab/
+│
+├── compose.yaml
+├── Dockerfile
+├── Makefile
+├── README.md
+├── EXERCISE.md
+├── INSTRUCTOR_NOTES.md
+├── .gitignore
+│
+├── scripts/
+│   ├── run_demo.sh
+│   ├── generate_training_data.sh
+│   ├── train_ai.sh
+│   ├── run_tests.sh
+│   ├── smoke_test.sh
+│   └── validate_output.sh
+│
+├── models/
+│   └── .gitkeep
+│
+├── data/
+│   └── .gitkeep
+│
+├── training/
+│   ├── generate_dataset.py
+│   ├── train_detector.py
+│   ├── export_onnx.py
+│   └── validate_model.py
+│
+├── scenarios/
+│   ├── simple_loop.yaml
+│   ├── obstacle_loop.yaml
+│   └── occlusion_test.yaml
+│
+├── worlds/
+│   ├── demo_world.sdf
+│   └── training_world.sdf
+│
+├── ros_ws/
+│   └── src/
+│       ├── followbot_description/
+│       ├── followbot_bringup/
+│       ├── followbot_interfaces/
+│       ├── leader_mission/
+│       ├── follower_perception/
+│       ├── follower_tracking/
+│       ├── experiment_logger/
+│       └── video_compositor/
+│
+└── output/
+    └── .gitkeep
+```
+
+`data/generated/`、`models/*.onnx`、`output/*`はGit管理対象外とする。
+
+---
+
+# 8. ロボット
+
+教材用の単純な差動二輪ロボット`FollowBot`を使用する。
+
+primitive geometryを使用し、複雑なmeshは不要。
+
+最低限以下を持つ。
+
+```text
+base_footprint
+base_link
+
+left_wheel_link
+right_wheel_link
+caster_link
+
+camera_link
+lidar_link
+```
+
+目安:
+
+```text
+body:
+    0.35 × 0.28 × 0.15 m
+
+wheel radius:
+    0.06 m
+
+wheel separation:
+    0.25 m
+```
+
+---
+
+# 9. ros2_control
+
+Gazebo上のロボットを`gz_ros2_control`で制御する。
+
+最低限、
+
+```text
+joint_state_broadcaster
+diff_drive_controller
+```
+
+を使用する。
+
+単純なGazebo DiffDrive Pluginだけで完成扱いしてはならない。
+
+---
+
+# 10. 2台のロボット
+
+以下をspawnする。
+
+```text
+Leader
+Follower
+```
+
+色を明確に変える。
+
+例:
+
+```text
+Leader   : blue
+Follower : red
+```
+
+LeaderにはCameraから認識しやすい特徴的なmarker/bodyを持たせる。
+
+---
+
+# 11. Namespace
+
+ROS 2 namespaceを完全に分離する。
+
+```text
+/leader/...
+/follower/...
+```
+
+例:
+
+```text
+/leader/cmd_vel
+/leader/odom
+/leader/scan
+/leader/camera/image_raw
+/leader/joint_states
+
+/follower/cmd_vel
+/follower/odom
+/follower/scan
+/follower/camera/image_raw
+/follower/joint_states
+```
+
+---
+
+# 12. TF
+
+Leader/FollowerのTF frame名が衝突しないようprefixを付ける。
+
+```text
+leader/odom
+leader/base_link
+leader/camera_link
+leader/lidar_link
+
+follower/odom
+follower/base_link
+follower/camera_link
+follower/lidar_link
+```
+
+必要に応じてmap frameのnamespace/prefixも適切に処理する。
+
+---
+
+# 13. Sensor
+
+最低限以下を搭載する。
+
+## RGB Camera
+
+```text
+resolution: 320 × 240
+rate:       10 Hz
+FOV:        約100°
+```
+
+## 2D LiDAR
+
+```text
+samples: 360
+rate:    10 Hz
+range:   0.1～8 m
+FOV:     360°
+```
+
+## Odometry
+
+```text
+20 Hz以上
+```
+
+---
+
+# 14. World
+
+デモ用Worldは、
+
+```text
+8 m × 8 m
+```
+
+程度とする。
+
+外壁を設置する。
+
+3～5個程度のBox障害物を設置する。
+
+障害物には、
+
+```text
+Nav2による回避
+Camera遮蔽
+Leaderの一時的消失
+```
+
+を発生させる役割を持たせる。
+
+---
+
+# 15. Map
+
+Gazebo Worldに対応するNav2用の既知mapを用意する。
+
+```text
+followbot_bringup/maps/
+├── demo_map.yaml
+└── demo_map.pgm
+```
+
+MVPではSLAMを使用しない。
+
+---
+
+# 16. Leader
+
+LeaderはNav2を使用してWaypoint列を走行する。
+
+WaypointはPythonコードへhard-codeしない。
+
+Scenario YAMLから読み込む。
+
+例:
+
+```yaml
+leader:
+  initial_pose:
+    x: -3.0
+    y: -2.0
+    yaw: 0.0
+
+  speed_limit: 0.35
+
+  waypoints:
+    - {x: -3.0, y: -2.0, yaw: 0.0}
+    - {x:  2.5, y: -2.0, yaw: 1.57}
+    - {x:  2.5, y:  2.0, yaw: 3.14}
+    - {x: -2.5, y:  2.0, yaw: -1.57}
+```
+
+Nav2 Simple CommanderまたはNav2 Action APIを利用する。
+
+---
+
+# 17. Follower
+
+FollowerはLeaderのWaypointを知らない。
+
+以下のみからLeaderを追跡する。
+
+```text
+Follower Camera
+Follower LiDAR
+Follower Odometry
+Follower TF
+```
+
+処理:
+
+```text
+Camera
+   ↓
+Perception
+   ↓
+Leader Bounding Box
+   ↓
+Bearing
+   +
+LiDAR Range
+   ↓
+Relative Target Position
+   ↓
+TF2
+   ↓
+Target Pose in map
+   ↓
+Nav2
+   ↓
+Follower movement
+```
+
+---
+
+# 18. Privileged Information禁止
+
+AIおよびFollower Navigationに以下を入力してはならない。
+
+```text
+Leader ground-truth pose
+Leader odom
+Leader Nav2 path
+Leader waypoint
+Leader cmd_vel
+Leader future position
+```
+
+これらは、
+
+```text
+Training annotation
+Evaluation
+Telemetry
+Video overlay
+Automated test
+```
+
+でのみ使用可能。
+
+---
+
+# 19. Perception Backend
+
+Perceptionは交換可能にする。
+
+最低限、
+
+```text
+truth
+marker
+ai
+```
+
+の3モードを実装する。
+
+---
+
+# 20. truth mode
+
+デバッグ専用。
+
+GazeboのGround Truthを利用する。
+
+目的:
+
+```text
+Nav2
+TF
+Follower control
+```
+
+が正しく動作するか確認する。
+
+最終デモでは使用しない。
+
+---
+
+# 21. marker mode
+
+OpenCVによる色抽出を使用する。
+
+AIではない。
+
+例えばLeaderの青色markerを、
+
+```text
+RGB
+ ↓
+HSV
+ ↓
+threshold
+ ↓
+morphology
+ ↓
+connected component
+ ↓
+bounding box
+```
+
+で検出する。
+
+目的は、
+
+```text
+Camera
+LiDAR
+Target Pose
+Nav2
+```
+
+までをAIとは独立して検証することである。
+
+---
+
+# 22. ai mode
+
+`make train-ai`で生成された、
+
+```text
+models/leader_detector.onnx
+```
+
+をONNX Runtime CPUで読み込む。
+
+Camera画像からLeaderを検出する。
+
+---
+
+# 23. AIモデル
+
+MVPではLeaderが最大1台しか存在しないため、大規模な汎用物体検出器は不要。
+
+小型CNNを使用する。
+
+入力:
+
+```text
+RGB image
+160 × 120
+```
+
+出力:
+
+```text
+objectness
+cx
+cy
+width
+height
+```
+
+Bounding Box値は0～1に正規化する。
+
+---
+
+# 24. Reference Network
+
+目安:
+
+```text
+Input
+  160 × 120 × 3
+
+Conv
+ReLU
+Pool
+
+Conv
+ReLU
+Pool
+
+Conv
+ReLU
+Pool
+
+Dense 128
+ReLU
+
+├── Objectness
+└── Bounding Box (4)
+```
+
+損失:
+
+```text
+Objectness:
+    Binary Cross Entropy
+
+Bounding Box:
+    Smooth L1
+```
+
+より適切な小型CNNへの変更は許可する。
+
+CPU学習可能であることを優先する。
+
+---
+
+# 25. Synthetic Dataset Generation
+
+学習画像はGazeboから自動生成する。
+
+外部画像データセットは禁止しないが、標準フローでは使用しない。
+
+標準フローは完全にGazeboだけで完結させる。
+
+---
+
+# 26. Training World
+
+`training_world.sdf`を用意する。
+
+LeaderとCameraの相対関係を自動的に変更しながら画像を生成する。
+
+ランダム化対象:
+
+```text
+Leader distance
+Leader bearing
+Leader orientation
+Camera orientation
+background
+lighting
+obstacle placement
+partial occlusion
+```
+
+---
+
+# 27. Negative Samples
+
+Leaderが、
+
+```text
+Camera視野外
+完全遮蔽
+存在しない
+```
+
+画像も生成する。
+
+AIが「常にLeaderが存在する」と学習しないようにする。
+
+---
+
+# 28. Annotation
+
+人手annotationを要求しない。
+
+Training時のみ利用可能なGround Truth情報からBounding Boxを生成する。
+
+実装方法はコーディングエージェントが最も堅牢な方式を選択してよい。
+
+候補:
+
+```text
+Gazebo pose + camera projection
+
+training専用segmentation情報
+
+training専用marker segmentation
+```
+
+ただし、生成されたBBoxを少なくとも一部画像に描画してvalidationし、
+
+```text
+data/generated/debug/
+```
+
+へ保存すること。
+
+明らかに誤ったannotationで学習を続行してはならない。
+
+---
+
+# 29. Dataset
+
+デフォルト:
+
+```text
+2000 images
+```
+
+程度を目安とする。
+
+CPU性能を考慮し、環境変数で変更可能にする。
+
+```bash
+TRAIN_IMAGES=500 make train-ai
+```
+
+などを許可する。
+
+---
+
+# 30. Dataset構造
+
+```text
+data/generated/
+├── train/
+│   ├── images/
+│   └── labels.csv
+│
+├── val/
+│   ├── images/
+│   └── labels.csv
+│
+├── debug/
+│
+└── metadata.json
+```
+
+---
+
+# 31. Dataset Metadata
+
+最低限以下を保存する。
+
+```json
+{
+  "seed": 42,
+  "num_images": 2000,
+  "train_images": 1600,
+  "val_images": 400,
+  "image_width": 160,
+  "image_height": 120
+}
+```
+
+---
+
+# 32. Train / Validation
+
+基本比率:
+
+```text
+Train: 80%
+Validation: 20%
+```
+
+とする。
+
+Seedを固定可能にする。
+
+---
+
+# 33. make train-ai
+
+Makefileでは、
+
+```makefile
+train-ai:
+    generate-data
+    train-model
+    export-model
+    validate-model
+```
+
+相当の処理を行う。
+
+同時に個別ターゲットも提供する。
+
+```bash
+make generate-data
+make train-model
+make export-model
+make validate-model
+```
+
+---
+
+# 34. Training Artifact
+
+学習後、
+
+```text
+models/
+├── leader_detector.pt
+└── leader_detector.onnx
+```
+
+を生成してよい。
+
+デモで使用する正式成果物は、
+
+```text
+leader_detector.onnx
+```
+
+とする。
+
+---
+
+# 35. Model Validation
+
+`make train-ai`はONNXを出力するだけでは成功扱いにしない。
+
+最低限、
+
+```text
+validation loss
+detection recall
+bounding-box error
+ONNX inference success
+PyTorch vs ONNX consistency
+CPU inference time
+```
+
+を確認する。
+
+結果を、
+
+```text
+models/training_report.json
+```
+
+へ保存する。
+
+---
+
+# 36. AIモデルが存在しない場合
+
+以下を実行して、
+
+```bash
+PERCEPTION_MODE=ai make demo
+```
+
+モデルが存在しない場合、明確なエラーで終了する。
+
+例:
+
+```text
+ERROR: models/leader_detector.onnx not found.
+
+Run:
+
+    make train-ai
+
+or:
+
+    PERCEPTION_MODE=marker make demo
+```
+
+`make demo`が暗黙的にAI学習を開始してはならない。
+
+---
+
+# 37. Detection Message
+
+独自Message:
+
+```text
+TargetDetection.msg
+```
+
+内容:
+
+```text
+std_msgs/Header header
+
+bool detected
+float32 confidence
+
+float32 center_x
+float32 center_y
+
+float32 width
+float32 height
+```
+
+Topic:
+
+```text
+/follower/target_detection
+```
+
+---
+
+# 38. CameraからBearingを計算
+
+Bounding Box中心とCamera intrinsics/FOVからLeader方向を推定する。
+
+概念的には、
+
+```text
+bbox center_x
+      ↓
+pixel offset
+      ↓
+camera bearing
+```
+
+とする。
+
+---
+
+# 39. LiDAR Fusion
+
+Camera bearing周辺のLiDAR値を使用する。
+
+```text
+camera bearing
+      ↓
+LiDAR ± tolerance
+      ↓
+invalid values除去
+      ↓
+median
+      ↓
+target range
+```
+
+単一点ではなくmedian等を利用してノイズに強くする。
+
+---
+
+# 40. Target Pose
+
+Camera + LiDARから、
+
+```text
+geometry_msgs/msg/PoseStamped
+```
+
+を生成する。
+
+Topic:
+
+```text
+/follower/target_pose
+```
+
+Follower座標系からTF2でNav2が使用する座標系へ変換する。
+
+---
+
+# 41. Follow Distance
+
+FollowerはLeaderそのものへ衝突する位置をGoalにしてはならない。
+
+標準:
+
+```text
+desired_follow_distance = 1.0 m
+```
+
+とする。
+
+---
+
+# 42. Nav2
+
+Leader/FollowerそれぞれにNav2を使用する。
+
+Leader:
+
+```text
+Waypoint navigation
+```
+
+Follower:
+
+```text
+Dynamic target following
+```
+
+Nav2が、
+
+```text
+global planning
+local planning
+obstacle avoidance
+```
+
+を担当する。
+
+---
+
+# 43. Target Lost
+
+最後の有効Detectionから、
+
+```text
+0.5 sec
+```
+
+以上経過したら、
+
+```text
+TARGET_LOST
+```
+
+とする。
+
+短時間なら最後の有効位置を利用してよい。
+
+例えば、
+
+```text
+2～3 sec
+```
+
+以上見失った場合は、
+
+```text
+SEARCHING
+```
+
+へ移行する。
+
+SEARCHINGでは低速回転等の簡単な探索を行ってよい。
+
+---
+
+# 44. Redetection
+
+再検出した場合、
+
+```text
+TARGET_REDETECTED
+```
+
+イベントを生成し、通常追従へ戻る。
+
+---
+
+# 45. Scenario
+
+以下を用意する。
+
+```text
+simple_loop.yaml
+obstacle_loop.yaml
+occlusion_test.yaml
+```
+
+---
+
+# 46. simple_loop
+
+目的:
+
+```text
+基本的なLeader-Follower動作確認
+```
+
+遮蔽はほぼ発生させない。
+
+---
+
+# 47. obstacle_loop
+
+目的:
+
+```text
+Nav2 obstacle avoidance確認
+```
+
+Leader/Followerが障害物を回避する。
+
+---
+
+# 48. occlusion_test
+
+目的:
+
+```text
+AI detection
+Target Lost
+Redetection
+```
+
+の確認。
+
+Leaderが障害物の裏へ一時的に入る経路を設定する。
+
+---
+
+# 49. 標準Demo
+
+標準設定:
+
+```text
+scenario:
+    occlusion_test
+
+duration:
+    300 simulation seconds
+
+perception:
+    ai
+
+follow distance:
+    1.0 m
+
+camera:
+    10 Hz
+
+lidar:
+    10 Hz
+
+control:
+    20 Hz
+```
+
+---
+
+# 50. Docker Compose
+
+Composeをユーザーから見た実行入口とする。
+
+最低限、
+
+```text
+demo
+trainer
+test
+```
+
+service/profileを用意する。
+
+---
+
+# 51. Compose概念
+
+```yaml
+services:
+
+  demo:
+    build: .
+    environment:
+      ROS_DOMAIN_ID: "42"
+      SCENARIO: "occlusion_test"
+      PERCEPTION_MODE: "ai"
+      SIM_DURATION: "300"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    volumes:
+      - ./models:/workspace/models
+      - ./output:/workspace/output
+    command:
+      - /workspace/scripts/run_demo.sh
+
+  trainer:
+    build: .
+    profiles: ["train"]
+    volumes:
+      - ./models:/workspace/models
+      - ./data:/workspace/data
+    command:
+      - /workspace/scripts/train_ai.sh
+
+  test:
+    build: .
+    profiles: ["test"]
+    command:
+      - /workspace/scripts/run_tests.sh
+```
+
+実際に動作するComposeへ完成させること。
+
+---
+
+# 52. ROS 2 Launch
+
+Compose内に多数のROS node起動処理を書かない。
+
+システム内部の起動は、
+
+```text
+demo.launch.py
+training.launch.py
+```
+
+などのROS 2 Launchへ委譲する。
+
+---
+
+# 53. Demo起動順
+
+以下の依存関係を守る。
+
+```text
+Gazebo
+ ↓
+/clock
+ ↓
+Leader/Follower spawn
+ ↓
+ros2_control
+ ↓
+sensors
+ ↓
+Nav2 lifecycle active
+ ↓
+Perception
+ ↓
+Leader Mission
+ ↓
+Follower Tracking
+ ↓
+Recorder
+```
+
+単なる固定sleepだけに依存せず、可能な箇所はROS service/topic/lifecycle stateを確認する。
+
+---
+
+# 54. rosbag2
+
+標準で最低限以下を保存する。
+
+```text
+/follower/odom
+/follower/scan
+/follower/target_detection
+/follower/target_pose
+/follower/cmd_vel
+
+/leader/odom
+```
+
+Camera画像のrosbag保存はオプションとする。
+
+---
+
+# 55. Telemetry
+
+CSVを生成する。
+
+最低限:
+
+```text
+simulation time
+true leader/follower distance
+estimated target distance
+AI detected
+AI confidence
+follow error
+Follower velocity
+Follower angular velocity
+Nav2 state
+target state
+```
+
+Ground Truth距離は評価専用。
+
+Follower Controllerへ入力してはならない。
+
+---
+
+# 56. Summary
+
+実験終了時、
+
+```text
+summary.json
+```
+
+を生成する。
+
+例:
+
+```json
+{
+  "scenario": "occlusion_test",
+  "perception": "ai",
+  "duration_sec": 300,
+  "desired_follow_distance_m": 1.0,
+  "mean_follow_distance_m": 1.12,
+  "follow_rmse_m": 0.28,
+  "target_detected_fraction": 0.84,
+  "target_lost_count": 4,
+  "collision_count": 0
+}
+```
+
+---
+
+# 57. Video
+
+最終成果物として、
+
+```text
+combined.mp4
+```
+
+を自動生成する。
+
+目標:
+
+```text
+1280 × 720
+10 fps
+H.264
+```
+
+---
+
+# 58. Video Layout
+
+```text
+┌────────────────────────┬───────────────┐
+│                        │ LEADER CAMERA │
+│                        ├───────────────┤
+│       OVERVIEW         │ FOLLOWER CAM  │
+│                        │ + AI BBOX     │
+│                        ├───────────────┤
+│                        │ TELEMETRY     │
+└────────────────────────┴───────────────┘
+```
+
+Overview Cameraは評価・動画専用。
+
+Followerから利用してはならない。
+
+---
+
+# 59. Video Overlay
+
+最低限、
+
+```text
+SIM TIME
+PERCEPTION: AI
+DETECTED / LOST
+confidence
+estimated distance
+true distance
+Nav2 status
+```
+
+を表示する。
+
+Follower CameraにはAI Bounding Boxを描画する。
+
+---
+
+# 60. Output
+
+1回の実験ごとに、
+
+```text
+output/<run_id>/
+├── combined.mp4
+├── telemetry.csv
+├── events.csv
+├── summary.json
+├── scenario.yaml
+├── environment.txt
+└── rosbag/
+```
+
+を生成する。
+
+---
+
+# 61. Makefile
+
+最低限以下を提供する。
+
+```bash
+make build
+
+make generate-data
+make train-model
+make export-model
+make validate-model
+
+make train-ai
+
+make demo
+make demo-marker
+make demo-truth
+
+make smoke-test
+make test
+make validate-output
+
+make clean-data
+make clean-model
+make clean-output
+```
+
+---
+
+# 62. Smoke Test
+
+短時間のテストを提供する。
+
+```bash
+make smoke-test
+```
+
+30～60 simulation seconds程度。
+
+最低限確認:
+
+```text
+Gazebo起動
+Leader spawn
+Follower spawn
+
+ros2_control active
+
+Camera publish
+LiDAR publish
+Odometry publish
+
+Nav2 active
+
+Leader movement
+Follower movement
+
+output生成
+```
+
+---
+
+# 63. Unit Test
+
+最低限以下をテストする。
+
+```text
+scenario parser
+marker detector
+AI inference
+camera bearing calculation
+LiDAR fusion
+target pose calculation
+target lost timeout
+ONNX loading
+video compositor
+```
+
+---
+
+# 64. AI Pipeline Test
+
+`make train-ai`に対するテストを用意する。
+
+CI/Smoke Test用には、
+
+```text
+TRAIN_IMAGES=100
+TRAIN_EPOCHS=1～2
+```
+
+などの小規模設定を使用可能にする。
+
+目的は精度ではなくpipelineの成立確認。
+
+---
+
+# 65. README
+
+READMEには最低限、
+
+```text
+Architecture
+Requirements
+Build
+AI training
+Demo execution
+Marker mode
+Scenario selection
+Output
+rosbag inspection
+Troubleshooting
+```
+
+を記載する。
+
+---
+
+# 66. EXERCISE.md
+
+学生向けの演習問題を含める。
+
+## Exercise 1: ROS 2構成確認
+
+```bash
+ros2 node list
+ros2 topic list
+ros2 action list
+```
+
+Leader/Follower namespaceの違いを確認する。
+
+---
+
+## Exercise 2: Sensor確認
+
+```bash
+ros2 topic echo /follower/odom
+```
+
+Camera/LiDAR/OdometryのTopicとmessage typeを調べる。
+
+---
+
+## Exercise 3: Leader経路変更
+
+Scenario YAMLのWaypointを変更する。
+
+Followerには変更を知らせず追従できることを確認する。
+
+---
+
+## Exercise 4: MarkerとAI比較
+
+```bash
+make demo-marker
+make demo
+```
+
+結果を比較する。
+
+比較項目:
+
+```text
+detection rate
+target lost count
+follow RMSE
+```
+
+---
+
+## Exercise 5: AI Training
+
+```bash
+make clean-model
+make train-ai
+```
+
+を実行する。
+
+以下を確認する。
+
+```text
+dataset
+training report
+ONNX model
+```
+
+問:
+
+> GazeboのGround Truthを学習ラベル生成に使うことと、実行時にFollowerへGround Truthを渡すことの違いを説明せよ。
+
+---
+
+## Exercise 6: Occlusion
+
+`occlusion_test`を実行する。
+
+```text
+DETECTED
+↓
+LOST
+↓
+SEARCHING
+↓
+REDETECTED
+```
+
+を動画とrosbagから確認する。
+
+---
+
+## Exercise 7: Follow Distance
+
+```text
+0.5 m
+1.0 m
+1.5 m
+```
+
+を比較する。
+
+追従性能と安全性の関係を考察する。
+
+---
+
+## Exercise 8: rosbag2
+
+保存されたbagを、
+
+```bash
+ros2 bag info ...
+```
+
+で確認する。
+
+動画だけでなくrosbagを保存する利点を考察する。
+
+---
+
+# 67. 発展課題
+
+以下をREADMEまたはEXERCISEへ記載する。
+
+### A. Domain Randomization
+
+Training時の、
+
+```text
+lighting
+background
+Leader color variation
+camera noise
+```
+
+を増やす。
+
+### B. Motion Prediction
+
+過去のLeader推定位置から未来位置を予測する。
+
+### C. Action Chunking
+
+AI制御へ発展させる場合、複数時刻分のActionをまとめて生成する。
+
+### D. Tag Game
+
+LeaderにもFollower認識機能を追加する。
+
+Followerが接近したらLeaderが逃げるGoalを生成する。
+
+---
+
+# 68. デバッグの基本方針
+
+問題を以下の順で切り分けられる構造にする。
+
+```text
+truth mode
+   ↓
+Nav2 / TFは正常か？
+
+marker mode
+   ↓
+Camera / LiDAR / Target Poseは正常か？
+
+ai mode
+   ↓
+AI Perceptionは正常か？
+```
+
+この3段階を必ず維持する。
+
+---
+
+# 69. AI学習失敗時の切り分け
+
+まずValidation Datasetに対して、
+
+```text
+Ground Truth
+vs
+AI Prediction
+```
+
+を比較する。
+
+Gazeboへデプロイする前に、既知データでAIモデルが正常に学習できていることを確認する。
+
+---
+
+# 70. 禁止事項
+
+以下の実装で完成扱いしてはならない。
+
+```text
+FollowerがLeader odomをsubscribeする
+
+FollowerがLeader waypointを読む
+
+FollowerがGazebo ground truthを読む
+
+AIモデルを外部から手動ダウンロードしないと動かない
+
+手動annotationを必須にする
+
+GPUを必須にする
+
+marker detectorだけでAI版完成とする
+
+Nav2を単純な自作追従controllerで置き換える
+
+ros2_controlを省略する
+
+手作業で動画を編集する
+```
+
+---
+
+# 71. Definition of Done
+
+以下をすべて満たすこと。
+
+1. `make build`成功。
+2. repositoryに学習済みONNXが存在しない。
+3. `make train-ai`が完全自動で動作。
+4. Gazeboから学習データを生成。
+5. annotationが自動生成。
+6. AIをCPUで学習。
+7. validation実行。
+8. ONNX export成功。
+9. ONNX Runtime inference成功。
+10. `leader_detector.onnx`生成。
+11. `make demo`成功。
+12. Leader/Followerがspawn。
+13. namespaceが分離。
+14. `gz_ros2_control`を使用。
+15. Camera/LiDARが動作。
+16. LeaderがNav2でWaypoint走行。
+17. FollowerがLeader経路を知らない。
+18. AIがFollower CameraからLeaderを検出。
+19. Camera + LiDARでTarget Poseを推定。
+20. Nav2でFollowerが追従。
+21. 障害物を回避。
+22. OcclusionでTarget Lost発生。
+23. Redetection後に追従再開。
+24. rosbag生成。
+25. telemetry.csv生成。
+26. summary.json生成。
+27. combined.mp4生成。
+28. CPU-onlyで実行可能。
+29. smoke test成功。
+30. EXERCISE.md完成。
+
+---
+
+# 72. コーディングエージェントの実装順序
+
+一度にすべて実装せず、以下の順番で完成・検証すること。
+
+```text
+Phase 1
+Docker + ROS 2 + Gazebo
+
+Phase 2
+FollowBot 1台 + gz_ros2_control
+
+Phase 3
+Leader / Follower + namespace
+
+Phase 4
+Camera + LiDAR
+
+Phase 5
+Nav2
+
+Phase 6
+Leader Waypoint Mission
+
+Phase 7
+truth mode追従
+
+Phase 8
+marker mode追従
+
+Phase 9
+Camera + LiDAR Target Pose
+
+Phase 10
+Synthetic Dataset Generator
+
+Phase 11
+AI Training
+
+Phase 12
+ONNX Export / Validation
+
+Phase 13
+AI mode追従
+
+Phase 14
+Occlusion / Lost / Redetection
+
+Phase 15
+rosbag / Telemetry
+
+Phase 16
+Video
+
+Phase 17
+Exercise / Documentation / Tests
+```
+
+各Phase完了時に実行可能な状態を維持すること。
+
+---
+
+# 73. 最終成果の意味
+
+この演習で重要なのは、単にAIモデルを動かすことではない。
+
+受講者が、
+
+```text
+Gazebo
+    ↓
+Training Data
+    ↓
+AI
+    ↓
+ROS 2
+    ↓
+Sensor Fusion
+    ↓
+TF
+    ↓
+Nav2
+    ↓
+ros2_control
+    ↓
+Robot Motion
+```
+
+という一連の関係を理解することを目的とする。
+
+最終的には、
+
+> **Gazebo上で教師データそのものを作り、AIを学習し、そのモデルをROS 2システムへデプロイして、認識結果を実際のロボット行動へ接続する**
+
+ところまでを、外部の学習済みモデルや手動annotationなしで再現可能な教材とする。

@@ -1,0 +1,17 @@
+data/generated/
+models/*.onnx
+models/*.pt
+models/training_report.json
+output/*
+!output/.gitkeep
+!models/.gitkeep
+!data/.gitkeep
+ros_ws/build/
+ros_ws/install/
+ros_ws/log/
+__pycache__/
+*.pyc
+.pytest_cache/
+models/last_checkpoint.pt
+# クラッシュ時のコアダンプ (gz bridge が shutdown 時に落ちることがある)
+core.*

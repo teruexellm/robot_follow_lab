@@ -1,0 +1,180 @@
+<?xml version="1.0" ?>
+<!--
+  demo_world : 8m x 8m / 外壁 / Box 障害物 4 個  (spec v2.0 §14)
+
+  障害物は以下を担う:
+    * Nav2 による回避対象
+    * Follower カメラから Leader を一時的に遮蔽 (spec §48 occlusion_test)
+
+  座標系: 原点が部屋の中心。走行可能領域は概ね x,y ∈ [-3.7, 3.7]。
+  障害物の寸法・位置は followbot_bringup/maps の生成元と一致させること
+  (scripts/make_map.py がこの数値を参照する)。
+-->
+<sdf version="1.9">
+  <world name="demo">
+
+    <physics name="4ms" type="ignored">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system"           name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-sensors-system"           name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-user-commands-system"     name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-imu-system"               name="gz::sim::systems::Imu"/>
+
+    <scene>
+      <ambient>0.6 0.6 0.6 1</ambient>
+      <background>0.75 0.8 0.85 1</background>
+      <grid>false</grid>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.4 0.2 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>12 12</size></plane></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>12 12</size></plane></geometry>
+          <material>
+            <ambient>0.55 0.55 0.55 1</ambient>
+            <diffuse>0.65 0.65 0.65 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ========== 外壁 (内寸 8m x 8m, 厚さ 0.1m, 高さ 0.6m) ========== -->
+    <model name="walls">
+      <static>true</static>
+      <link name="link">
+        <!-- north (+y) -->
+        <collision name="n_c"><pose>0 4.05 0.3 0 0 0</pose>
+          <geometry><box><size>8.2 0.1 0.6</size></box></geometry></collision>
+        <visual name="n_v"><pose>0 4.05 0.3 0 0 0</pose>
+          <geometry><box><size>8.2 0.1 0.6</size></box></geometry>
+          <material><ambient>0.4 0.4 0.42 1</ambient><diffuse>0.5 0.5 0.52 1</diffuse></material></visual>
+        <!-- south (-y) -->
+        <collision name="s_c"><pose>0 -4.05 0.3 0 0 0</pose>
+          <geometry><box><size>8.2 0.1 0.6</size></box></geometry></collision>
+        <visual name="s_v"><pose>0 -4.05 0.3 0 0 0</pose>
+          <geometry><box><size>8.2 0.1 0.6</size></box></geometry>
+          <material><ambient>0.4 0.4 0.42 1</ambient><diffuse>0.5 0.5 0.52 1</diffuse></material></visual>
+        <!-- east (+x) -->
+        <collision name="e_c"><pose>4.05 0 0.3 0 0 0</pose>
+          <geometry><box><size>0.1 8.2 0.6</size></box></geometry></collision>
+        <visual name="e_v"><pose>4.05 0 0.3 0 0 0</pose>
+          <geometry><box><size>0.1 8.2 0.6</size></box></geometry>
+          <material><ambient>0.4 0.4 0.42 1</ambient><diffuse>0.5 0.5 0.52 1</diffuse></material></visual>
+        <!-- west (-x) -->
+        <collision name="w_c"><pose>-4.05 0 0.3 0 0 0</pose>
+          <geometry><box><size>0.1 8.2 0.6</size></box></geometry></collision>
+        <visual name="w_v"><pose>-4.05 0 0.3 0 0 0</pose>
+          <geometry><box><size>0.1 8.2 0.6</size></box></geometry>
+          <material><ambient>0.4 0.4 0.42 1</ambient><diffuse>0.5 0.5 0.52 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ========== 障害物 ==========
+         obstacle_1 : 中央やや西。周回経路の内側を塞ぎ、カメラ遮蔽の主役。
+         obstacle_2 : 北東。Nav2 の局所回避用。
+         obstacle_3 : 南東。コーナー通過時の遮蔽。
+         obstacle_4 : 中央東。obstacle_1 との間に見通しの切れる通路を作る。
+    -->
+    <model name="obstacle_1">
+      <static>true</static>
+      <pose>-0.8 0.4 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.2 1.2 0.8</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>1.2 1.2 0.8</size></box></geometry>
+          <material><ambient>0.45 0.35 0.25 1</ambient><diffuse>0.6 0.45 0.3 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="obstacle_2">
+      <static>true</static>
+      <pose>1.6 2.3 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.8 0.8 0.8</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.8 0.8 0.8</size></box></geometry>
+          <material><ambient>0.45 0.35 0.25 1</ambient><diffuse>0.6 0.45 0.3 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="obstacle_3">
+      <static>true</static>
+      <pose>1.4 -2.4 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.9 0.9 0.8</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>0.9 0.9 0.8</size></box></geometry>
+          <material><ambient>0.45 0.35 0.25 1</ambient><diffuse>0.6 0.45 0.3 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="obstacle_4">
+      <static>true</static>
+      <pose>-0.6 -1.9 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.0 0.7 0.8</size></box></geometry></collision>
+        <visual name="v">
+          <geometry><box><size>1.0 0.7 0.8</size></box></geometry>
+          <material><ambient>0.45 0.35 0.25 1</ambient><diffuse>0.6 0.45 0.3 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ========== Overview カメラ (評価・動画専用, spec §58) ==========
+         Follower はこのカメラを利用してはならない。
+
+         **ほぼ真上から**見下ろす。斜め (pitch 0.72 rad = 41 deg) にして
+         いたが、障害物の陰や壁の向こうに入った機体が見えなくなり、
+         動画で追従の様子を追えなかった。真上からなら両機の位置が
+         常に見える。奥行き感は失うが、動画の目的は位置関係の提示である。
+
+         高さ 9.5 m / hfov 0.95 rad で横 9.77 m x 縦 8.79 m を写す。
+         部屋の外寸 8.2 m に対して余裕 0.6-1.6 m で、壁まで入る。
+         (高さ 9.0 m では縦 8.33 m で壁が切れる)
+
+         update_rate は 10。800x720 の描画は CPU では追いつかず実測 5 Hz
+         前後だが、**要求値は上限として働く**ので下げるとさらに減る
+         (5 を要求したら 2.4 Hz になった。DEVLOG V-2)。 -->
+    <model name="overview_camera">
+      <static>true</static>
+      <pose>0 0 9.5 0 1.5708 1.5708</pose>
+      <link name="link">
+        <sensor name="overview" type="camera">
+          <topic>overview/image_raw</topic>
+          <camera_info_topic>overview/camera_info</camera_info_topic>
+          <gz_frame_id>overview_camera</gz_frame_id>
+          <update_rate>10</update_rate>
+          <always_on>1</always_on>
+          <camera>
+            <horizontal_fov>0.95</horizontal_fov>
+            <image><width>800</width><height>720</height><format>R8G8B8</format></image>
+            <clip><near>0.1</near><far>50.0</far></clip>
+          </camera>
+        </sensor>
+      </link>
+    </model>
+
+  </world>
+</sdf>

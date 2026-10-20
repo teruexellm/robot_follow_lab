@@ -1,0 +1,275 @@
+diff --git a/ros_ws/src/follower_tracking/follower_tracking/follow_controller.py b/ros_ws/src/follower_tracking/follower_tracking/follow_controller.py
+index 7a6a6c1..751f2d6 100644
+--- a/ros_ws/src/follower_tracking/follower_tracking/follow_controller.py
++++ b/ros_ws/src/follower_tracking/follower_tracking/follow_controller.py
+@@ -121,20 +121,31 @@ def extrapolate_target(x: float, y: float, velocity: tuple[float, float] | None,
+ def should_rotate_in_place(goal_distance: float | None,
+                            arrival_distance: float,
+                            consecutive_aborts: int,
+-                           max_aborts: int) -> bool:
++                           max_aborts: int,
++                           stalled: bool = False) -> bool:
+     """SEARCHING で前進するか定位置回転するかを決める。
+ 
+-    判断材料は 2 つ。
++    判断材料は 3 つ。
+ 
+     1. ゴールが目前なら回転する (T-2)
+-    2. **ゴールへ行けないなら回転する** (T-7)
+-       Nav2 がゴールを連続で abort している場合、前進を選び続けても
+-       車体は動かない。動かなければ視野も変わらず再検出できない。
+-       外挿した点が地図の外に出た場合 (planner_server: worldToMap failed)
+-       に実際この状態へ落ちた。
++    2. **動いておらず、かつゴールが失敗しているなら回転する** (T-8)
++       前進を選んでも車体が動いていなければ、その選択は効いていない。
++       ただし停止だけを条件にすると、Nav2 が低速で動き出す途中を
++       誤判定してゴールをキャンセルしてしまうので、
++       abort が 1 回以上あることを併せて要求する。
++    3. ゴールが連続で abort されているなら回転する (T-7)
++       2 の補助。abort の計数は 1 ゴールあたり 10 秒前後かかるので
++       これ単独では遅すぎた (実測: 計数に 35 秒かかり、その間
++       1 mm も動かなかった)。
+ 
+     ROS に依存しない純粋関数にしてある (spec §63)。
+     """
++    # 停止だけでは切り替えない。Nav2 が低速で正常に動き出す途中
++    # (加速中・その場旋回中) を停止と誤判定してゴールを
++    # キャンセルしてしまうため、**ゴールが 1 回でも失敗していること**を
++    # 併せて要求する (DEVLOG T-8 の副作用)。
++    if stalled and consecutive_aborts >= 1:
++        return True
+     if consecutive_aborts >= max_aborts:
+         return True
+     if goal_distance is None:
+@@ -171,6 +182,10 @@ class FollowController(Node):
+         self.declare_parameter("min_pursue_speed", 0.05)     # 静止と見なす速さ [m/s]
+         # ゴールが連続で abort されたら前進をあきらめて回転する (DEVLOG T-7)
+         self.declare_parameter("max_aborts_before_rotate", 3)
++        # 「前進を選んだのに動いていない」の判定 (DEVLOG T-8)。
++        # abort の計数より速く効く
++        self.declare_parameter("stall_window", 3.0)       # 変位を見る窓 [s]
++        self.declare_parameter("stall_distance", 0.05)    # これ未満なら停止 [m]
+         self.declare_parameter("search_angular_speed", 0.5)
+         self.declare_parameter("rate", 20.0)                # spec §49 control 20 Hz
+ 
+@@ -194,6 +209,8 @@ class FollowController(Node):
+         self.min_pursue_speed = float(self.get_parameter("min_pursue_speed").value)
+         self.max_aborts_before_rotate = int(
+             self.get_parameter("max_aborts_before_rotate").value)
++        self.stall_window = float(self.get_parameter("stall_window").value)
++        self.stall_distance = float(self.get_parameter("stall_distance").value)
+         self.search_angular_speed = float(
+             self.get_parameter("search_angular_speed").value)
+         self.search_arrival_distance = float(
+@@ -255,6 +272,9 @@ class FollowController(Node):
+         # 連続 abort 回数。行けないゴールを追い続けないための歯止め (T-7)
+         self.consecutive_aborts = 0
+         self.warned_unreachable = False
++        # 自己位置の履歴 (時刻, x, y)。停止の検出に使う (DEVLOG T-8)
++        self.own_history: list[tuple[float, float, float]] = []
++        self.warned_stalled = False
+ 
+         self.create_timer(1.0 / float(self.get_parameter("rate").value), self.tick)
+         self.get_logger().info(
+@@ -278,6 +298,9 @@ class FollowController(Node):
+         # 新しい観測が入ったらゴールも作り直せる。歯止めを解除する
+         self.consecutive_aborts = 0
+         self.warned_unreachable = False
++        # 自己位置の履歴 (時刻, x, y)。停止の検出に使う (DEVLOG T-8)
++        self.own_history: list[tuple[float, float, float]] = []
++        self.warned_stalled = False
+         now = self.now()
+         self.last_detection_time = now
+         # 速度推定用の履歴。窓の 3 倍だけ残せば十分
+@@ -325,14 +348,26 @@ class FollowController(Node):
+         return extrapolate_target(x, y, velocity, elapsed,
+                                   self.max_extrapolate_lead)
+ 
+-    def follow_goal(self) -> PoseStamped | None:
+-        """Leader の手前 follow_distance の点を map フレームで返す。"""
++    def follow_goal(self, standoff: float | None = None) -> PoseStamped | None:
++        """対象の手前 standoff の点を map フレームで返す。
++
++        standoff を省略すると follow_distance (spec §41)。
++        **SEARCHING では 0 を渡す** (DEVLOG T-9)。見失っている以上
++        相手はもうそこにいないので手前で止まる理由が無く、
++        最終既知位置そのものへ向かうほうが再検出の確率が高い
++        (そこは Leader の経路上にある)。
++        手前 follow_distance を狙うと、見失った時点で対象が
++        follow_distance より近かった場合にゴールが自分の後ろに生まれ、
++        「到達済み」と判定されて永久に回転する。
++        """
+         predicted = self.predicted_target()
+         if predicted is None:
+             return None
+         me = self.self_position()
+         if me is None:
+             return None
++        if standoff is None:
++            standoff = self.follow_distance
+ 
+         tx, ty = predicted
+         dx, dy = tx - me[0], ty - me[1]
+@@ -342,8 +377,8 @@ class FollowController(Node):
+         if distance < 1e-3:
+             return None
+ 
+-        # Follower から Leader へ向かう直線上で、Leader より手前の点
+-        ratio = max(0.0, (distance - self.follow_distance)) / distance
++        # Follower から対象へ向かう直線上で、対象より手前の点
++        ratio = max(0.0, (distance - standoff)) / distance
+         goal = PoseStamped()
+         goal.header.frame_id = self.global_frame
+         goal.header.stamp = self.get_clock().now().to_msg()
+@@ -451,6 +486,34 @@ class FollowController(Node):
+             return None
+         return math.hypot(predicted[0] - me[0], predicted[1] - me[1])
+ 
++    def record_own_position(self) -> None:
++        """自己位置の履歴を更新する (DEVLOG T-8)。"""
++        me = self.self_position()
++        if me is None:
++            return
++        now = self.now()
++        self.own_history.append((now, me[0], me[1]))
++        cutoff = now - 2.0 * self.stall_window
++        self.own_history = [s for s in self.own_history if s[0] >= cutoff]
++
++    def is_stalled(self) -> bool:
++        """直近 stall_window 秒でほとんど動いていないか。
++
++        「前進を選んだのに動いていない」を直接見る。T-7 の abort 計数は
++        1 ゴールあたり 10 秒前後かかるため、これ単独では遅すぎた。
++        窓ぶんの履歴が溜まるまでは停止と判定しない (起動直後の誤判定を防ぐ)。
++        """
++        if not self.own_history:
++            return False
++        now = self.own_history[-1][0]
++        old = [s for s in self.own_history if now - s[0] >= self.stall_window]
++        if not old:
++            return False
++        reference = old[-1]
++        moved = math.hypot(self.own_history[-1][1] - reference[1],
++                           self.own_history[-1][2] - reference[2])
++        return moved < self.stall_distance
++
+     def search(self) -> None:
+         """探索する (spec §43)。
+ 
+@@ -469,18 +532,27 @@ class FollowController(Node):
+         # これを考慮しないと前進も回転もせず SEARCHING のまま固まる
+         # (実測: 残距離 1.129 m / 追従距離 1.0 m でゴールが 0.129 m 先、
+         #  Nav2 は到達済みと判断。DEVLOG T-2)。
+-        remaining = self.distance_to_last_target()
+-        goal_distance = (remaining - self.follow_distance
+-                         if remaining is not None else None)
++        # **SEARCHING では最終既知位置そのものを目指す** (DEVLOG T-9)。
++        # 判定もゴールもスタンドオフを取らないので整合する。
++        goal_distance = self.distance_to_last_target()
++        stalled = self.is_stalled()
+         rotate = should_rotate_in_place(goal_distance,
+                                         self.search_arrival_distance,
+                                         self.consecutive_aborts,
+-                                        self.max_aborts_before_rotate)
++                                        self.max_aborts_before_rotate,
++                                        stalled=stalled)
+         if not rotate:
+-            goal = self.follow_goal()
++            self.warned_stalled = False
++            goal = self.follow_goal(standoff=0.0)
+             if goal is not None:
+                 self.drive_to(goal)
+             return
++        if stalled and not self.warned_stalled:
++            self.warned_stalled = True
++            self.get_logger().warn(
++                f"前進を選んだが {self.stall_window:.0f} s で "
++                f"{self.stall_distance:.2f} m も動いていない。"
++                " 定位置回転へ移る (DEVLOG T-8)")
+         if (self.consecutive_aborts >= self.max_aborts_before_rotate
+                 and not self.warned_unreachable):
+             self.warned_unreachable = True
+@@ -572,6 +644,7 @@ class FollowController(Node):
+                         " 追従は開始していない")
+                 return
+ 
++        self.record_own_position()
+         elapsed = self.update_state()
+         self.publish_state(elapsed)
+ 
+diff --git a/ros_ws/src/follower_tracking/test/test_target_state.py b/ros_ws/src/follower_tracking/test/test_target_state.py
+index be3ad86..69bc548 100644
+--- a/ros_ws/src/follower_tracking/test/test_target_state.py
++++ b/ros_ws/src/follower_tracking/test/test_target_state.py
+@@ -256,3 +256,71 @@ def test_negative_goal_distance_rotates():
+     視野を変えにいく。
+     """
+     assert should_rotate_in_place(-0.42, ARRIVAL, 0, MAX_ABORTS) is True
++
++
++# ---------- 停止の検出 (DEVLOG T-8) ----------
++
++
++def test_stalled_with_a_failed_goal_rotates():
++    """動いておらず、かつゴールが失敗しているなら回転に切り替えること。
++
++    T-7 の abort 計数は 1 ゴールあたり 10 秒前後かかるため、
++    閾値 (3 回) に達するまで 35 秒も静止していた実測がある。
++    abort 1 回 + 停止なら、その時点で切り替える。
++    """
++    assert should_rotate_in_place(5.0, ARRIVAL, 1, MAX_ABORTS,
++                                  stalled=True) is True
++
++
++def test_stall_alone_does_not_cancel_a_working_goal():
++    """停止だけでは切り替えないこと。
++
++    停止判定は 3 秒で 0.05 m 未満 (= 0.017 m/s) と緩い。
++    Nav2 が低速で動き出す途中 (加速中・その場旋回中) を誤判定して
++    ゴールをキャンセルすると、正常な走行を邪魔する。
++    """
++    assert should_rotate_in_place(5.0, ARRIVAL, 0, MAX_ABORTS,
++                                  stalled=True) is False
++
++
++def test_not_stalled_keeps_driving():
++    assert should_rotate_in_place(5.0, ARRIVAL, 0, MAX_ABORTS,
++                                  stalled=False) is False
++
++
++def test_many_aborts_rotate_even_without_stall_detection():
++    """停止を検出できなくても、abort が積もれば切り替わること (T-7)。"""
++    assert should_rotate_in_place(5.0, ARRIVAL, MAX_ABORTS, MAX_ABORTS,
++                                  stalled=False) is True
++
++
++def test_stalled_defaults_to_false_for_backward_compatibility():
++    """引数を省略しても従来どおりの判定になること。"""
++    assert should_rotate_in_place(5.0, ARRIVAL, 0, MAX_ABORTS) is False
++    assert should_rotate_in_place(0.1, ARRIVAL, 0, MAX_ABORTS) is True
++
++
++# ---------- SEARCHING のゴールにスタンドオフを取らない (DEVLOG T-9) ----------
++
++
++def test_searching_goal_distance_is_to_the_target_itself():
++    """SEARCHING の前進判定は最終既知位置までの距離で行うこと。
++
++    手前 follow_distance を狙うと、見失った時点で対象が
++    follow_distance より近かった場合にゴールが自分の後ろに生まれ、
++    「到達済み」と判定されて永久に回転する
++    (実測: 推定距離 0.8 m のまま SEARCHING が 36 % を占めた)。
++
++    見失っている以上そこに相手はいないので、手前で止まる理由が無い。
++    最終既知位置そのものへ向かうほうが再検出の確率が高い。
++    """
++    last_known = 0.8      # 追従距離 1.0 より近い
++    # スタンドオフを引くと負になり「到達済み」= 回転
++    assert should_rotate_in_place(last_known - 1.0, ARRIVAL, 0, MAX_ABORTS) is True
++    # 対象までの距離そのものなら前進できる
++    assert should_rotate_in_place(last_known, ARRIVAL, 0, MAX_ABORTS) is False
++
++
++def test_searching_still_rotates_once_the_last_known_point_is_reached():
++    """最終既知位置へ着いても見つからなければ回転すること。"""
++    assert should_rotate_in_place(0.2, ARRIVAL, 0, MAX_ABORTS) is True

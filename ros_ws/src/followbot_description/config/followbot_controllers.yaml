@@ -1,0 +1,61 @@
+# FollowBot の ros2_control 設定 (spec v2.0 §9)
+#
+# Leader / Follower で共用する。namespace ごとに値を変えないために:
+#   * joint 名に prefix を付けない (namespace で分離されるため衝突しない)
+#   * TF フレーム名は diff_drive_controller の tf_frame_prefix_enable に任せる
+#     -> namespace "leader" なら odom/base_footprint が leader/... として publish される
+#        (spec §12 の frame prefix 要件はこれで満たす)
+#
+# "/**/<node>" は「任意の namespace にある <node>」を指すワイルドカード。
+
+/**/controller_manager:
+  ros__parameters:
+    update_rate: 100          # Hz : 車輪の低レベル制御周期
+    use_sim_time: true
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    diff_drive_controller:
+      type: diff_drive_controller/DiffDriveController
+
+/**/joint_state_broadcaster:
+  ros__parameters:
+    use_sim_time: true
+
+/**/diff_drive_controller:
+  ros__parameters:
+    use_sim_time: true
+
+    left_wheel_names:  ["left_wheel_joint"]
+    right_wheel_names: ["right_wheel_joint"]
+
+    wheel_separation: 0.25    # spec §8
+    wheel_radius:     0.06    # spec §8
+
+    publish_rate: 50.0        # Odometry 出力 (spec §13: 20 Hz 以上)
+    odom_frame_id: odom       # tf_frame_prefix_enable により <ns>/odom になる
+    base_frame_id: base_footprint
+    tf_frame_prefix_enable: true
+
+    enable_odom_tf: true
+    open_loop: false
+    position_feedback: true
+    velocity_rolling_window_size: 10
+    cmd_vel_timeout: 0.5      # 指令が途切れたら停止
+
+    pose_covariance_diagonal:  [0.001, 0.001, 1e6, 1e6, 1e6, 0.03]
+    twist_covariance_diagonal: [0.001, 0.001, 1e6, 1e6, 1e6, 0.03]
+
+    publish_limited_velocity: true
+
+    # 速度・加速度制限 (Leader の speed_limit は Nav2 側で別途制約する)
+    linear.x.max_velocity:      0.6
+    linear.x.min_velocity:     -0.3
+    linear.x.max_acceleration:  1.0
+    linear.x.max_deceleration: -1.5
+
+    angular.z.max_velocity:      1.5
+    angular.z.min_velocity:     -1.5
+    angular.z.max_acceleration:  2.0
+    angular.z.max_deceleration: -2.5

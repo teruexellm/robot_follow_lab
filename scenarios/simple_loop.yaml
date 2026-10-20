@@ -1,0 +1,27 @@
+# 基本的な Leader-Follower 動作確認 (spec v2.0 §46)
+# 障害物から離れた外周を走行するため、遮蔽はほぼ発生しない。
+#
+# 座標は scripts/check_scenarios.py で検査している
+# (全 waypoint と初期姿勢が障害物から 0.5 m 以上離れていること)。
+name: simple_loop
+description: 外周を周回する。遮蔽なし。Nav2 と追従の基本動作を確認する。
+world: demo_world.sdf
+duration_sec: 300
+
+leader:
+  # Follower が後方 1.2 m に入るため、西壁から十分東に置く
+  initial_pose: {x: -1.8, y: -3.0, yaw: 0.0}
+  speed_limit: 0.35
+  loop: true
+  waypoints:
+    - {x:  3.0, y: -3.0, yaw: 1.5708}
+    - {x:  3.0, y:  3.0, yaw: 3.1416}
+    - {x: -3.0, y:  3.0, yaw: -1.5708}
+    - {x: -3.0, y: -3.0, yaw: 0.0}
+    - {x: -1.8, y: -3.0, yaw: 0.0}
+
+follower:
+  # Leader の後方 1.2 m (Leader 座標系)。Leader の経路は一切与えない (spec §17)
+  spawn_offset: {x: -1.2, y: 0.0}
+  follow_distance: 1.0
+  speed_limit: 0.50

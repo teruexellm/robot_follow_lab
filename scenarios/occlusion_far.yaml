@@ -1,0 +1,53 @@
+# 完全な状態遷移を実証するシナリオ (spec v2.0 §43, §44, §48 / EXERCISE 6)
+#
+# occlusion_test と **経路は同一**で、追従距離だけを 1.0 -> 1.5 m に変えたもの。
+#
+# なぜ分けるのか:
+#   spec §49 は標準デモを「occlusion_test + follow distance 1.0 m」と定めており、
+#   occlusion_test はその設定を維持する必要がある。しかし追従距離 1.0 m
+#   (実際 1.68 m) では最長連続遮蔽が 1.9 s で、
+#   SEARCHING (search_timeout 3.0 s) に到達しない。
+#   DETECTED -> LOST -> SEARCHING -> REDETECTED の全列を観察するために
+#   追従距離を上げた版を用意する。
+#
+#   1.5 m は spec §66 の Exercise 7 が比較対象として挙げている値
+#   (0.5 / 1.0 / 1.5 m) の 1 つであり、spec の範囲内にある。
+#
+# 幾何計算による追従距離と遮蔽の関係 (経路は 24.0 m 固定 / Leader 0.25 m/s):
+#
+#   指定   実際     遮蔽率  最長連続  区間/周  周長比  SEARCHING
+#   1.0 m  1.68 m    4.0%    1.9 s      2     14.3   未到達
+#   1.5 m  2.18 m   10.0%    4.5 s      3     11.0   到達     <- これを使う
+#   2.0 m  2.68 m   16.0%   11.2 s      2      9.0   到達
+#   2.5 m  3.18 m   20.0%   12.8 s      2      7.5   自己干渉の懸念
+#
+#   追従距離を上げると遮蔽は増えるが、周長比 (周長/追従距離) が 8 を下回ると
+#   Leader が周回して Follower に追いつき、互いを障害物と認識して停止する
+#   (実測: 周長比 3.6 で両機が 0.557 m で凍結)。
+#   1.5 m は「SEARCHING に到達する」と「自己干渉しない」を両立する。
+name: occlusion_far
+description: occlusion_test と同一経路で追従距離 1.5 m。SEARCHING を含む全遷移を実証する。
+world: demo_world.sdf
+duration_sec: 300
+
+leader:
+  # Follower が後方 1.7 m に入るため、西壁から十分東に置く
+  initial_pose: {x: -1.3, y: -3.0, yaw: 0.0}
+  speed_limit: 0.35
+  loop: true
+  waypoints:
+    - {x:  3.0, y: -3.0, yaw: 1.5708}
+    - {x:  3.0, y:  1.5, yaw: 3.1416}
+    - {x:  2.4, y:  1.5, yaw: 1.5708}   # 迂回開始: obstacle_2 の東側
+    - {x:  2.4, y:  3.1, yaw: 3.1416}   # 遮蔽区間
+    - {x:  0.8, y:  3.1, yaw: -1.5708}  # 遮蔽区間
+    - {x:  0.8, y:  1.5, yaw: 3.1416}
+    - {x: -3.0, y:  1.5, yaw: -1.5708}
+    - {x: -3.0, y: -3.0, yaw: 0.0}
+    - {x: -1.3, y: -3.0, yaw: 0.0}
+
+follower:
+  # 追従距離と同じ 1.5 m 後方に配置する
+  spawn_offset: {x: -1.5, y: 0.0}
+  follow_distance: 1.5
+  speed_limit: 0.50
